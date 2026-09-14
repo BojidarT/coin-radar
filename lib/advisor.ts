@@ -1,28 +1,19 @@
 import type {Coin} from './market';
-export type RiskConfig={bankroll:number;riskPct:number;maxAllocationPct:number;takeProfitPct:number;stopPct:number;trailingPct:number;liquidityDropPct:number;xDailyRequests:number};
-export const defaultConfig:RiskConfig={bankroll:0,riskPct:1,maxAllocationPct:5,takeProfitPct:50,stopPct:20,trailingPct:15,liquidityDropPct:30,xDailyRequests:0};
-export type Position={id:string;address:string;pair:string;symbol:string;entryPrice:number;amount:number;quantity:number;peakPrice:number;entryLiquidity:number|null;takeProfitPct:number;stopPct:number;trailingPct:number;liquidityDropPct:number;openedAt:string;closedAt:string|null;lastPrice:number|null;lastCheckedAt:string|null};
+import {capitalLimit,evaluateExitRules,finitePositive,type AlertState} from './trade-controls.mjs';
+export type RiskConfig={bankroll:number;riskPct:number;maxAllocationPct:number;takeProfitPct:number;stopPct:number;trailingPct:number;liquidityDropPct:number;xDailyRequests:number;cashReserveUsd?:number};
+export const defaultConfig:RiskConfig={bankroll:0,riskPct:1,maxAllocationPct:5,takeProfitPct:50,stopPct:20,trailingPct:15,liquidityDropPct:30,xDailyRequests:0,cashReserveUsd:0};
+export type Position={id:string;address:string;pair:string;symbol:string;entryPrice:number;amount:number;quantity:number;peakPrice:number;entryLiquidity:number|null;takeProfitPct:number;stopPct:number;trailingPct:number;liquidityDropPct:number;openedAt:string;closedAt:string|null;lastPrice:number|null;lastCheckedAt:string|null;lastSnapshotAt?:string|null;alertState?:AlertState};
 export type PositionEvent={kind:string;severity:'review'|'urgent';message:string};
-export function sizePosition(config:RiskConfig,committed:number,coin:Coin|null,reviewed:boolean){
- const bankroll=config.bankroll;
- if(!Number.isFinite(bankroll)||bankroll<=0)return {amount:0,ceiling:0,reason:'Set a trading budget first.',status:'Setup required'};
- const available=Math.max(0,bankroll-committed);
- const ceiling=Math.floor(Math.max(0,Math.min(bankroll*config.riskPct/100,bankroll*config.maxAllocationPct/100,available))*100)/100;
- if(!coin)return {amount:0,ceiling,reason:'Select a coin to evaluate.',status:'No selection'};
- if(coin.verdict!=='Research candidate')return {amount:0,ceiling,reason:'This coin does not pass the market research screen.',status:'Wait / avoid new entry'};
- if(!reviewed)return {amount:0,ceiling,reason:'Token safety has not been reviewed. The allocation stays at zero.',status:'Review required'};
- return {amount:ceiling,ceiling,reason:'Conditional research allocation after your manual safety review. This is the maximum principal you chose to put at risk, not an optimal investment estimate.',status:ceiling>0?'Within your risk limit':'No unallocated budget'};
+export function sizePosition(config:RiskConfig,committed:number,coin:Coin|null,reviewed:boolean,sameToken=0){
+ const limit=capitalLimit(config,committed,sameToken),ceiling=limit.ceiling;
+ if(!limit.valid)return {amount:0,ceiling:0,reason:'Set valid budget and exposure values first.',status:'Setup required'};
+ if(!coin)return {amount:0,ceiling,reason:'Refresh evidence for the selected coin and pool.',status:'Evidence required'};
+ if(!finitePositive(coin.price)||!finitePositive(coin.liquidity)||coin.verdict!=='Research candidate')return {amount:0,ceiling,reason:'This coin does not pass the market research screen with usable price and liquidity.',status:'Wait / avoid new entry'};
+ if(!reviewed)return {amount:0,ceiling,reason:'Complete the manual contract and exit checks. Allocation remains zero.',status:'Review required'};
+ return {amount:ceiling,ceiling,reason:'Your remaining principal ceiling across all recorded positions in this token, after your cash reserve. It is not an optimal investment estimate or a buy recommendation.',status:ceiling>0?'Within your chosen limit':'Token cap or available budget exhausted'};
 }
 export function evaluatePosition(p:Position,price:number|null,liquidity:number|null):{peak:number;events:PositionEvent[]}{
- if(price===null||!Number.isFinite(price)||price<=0)return {peak:p.peakPrice,events:[{kind:'data_unavailable',severity:'urgent',message:'Price unavailable. Exit conditions cannot be checked; inspect this position in Phantom.'}]};
- const peak=Math.max(p.peakPrice,p.entryPrice,price),change=(price/p.entryPrice-1)*100,drawdown=(1-price/peak)*100;
- const events:PositionEvent[]=[];
- if(price<=p.entryPrice*(1-p.stopPct/100))events.push({kind:'loss_threshold',severity:'urgent',message:`Loss threshold crossed: ${change.toFixed(1)}% from entry. Review an exit now; the quote is not an executable sell price.`});
- if(price>=p.entryPrice*(1+p.takeProfitPct/100))events.push({kind:'profit_target',severity:'review',message:`Profit target reached: +${change.toFixed(1)}% from entry. Review taking profit in Phantom.`});
- if(peak>p.entryPrice&&price<=peak*(1-p.trailingPct/100))events.push({kind:'trailing_pullback',severity:'urgent',message:`Price pulled back ${drawdown.toFixed(1)}% from the highest price observed since tracking began. Review an exit.`});
- if(liquidity===null)events.push({kind:'liquidity_unavailable',severity:'review',message:'Pool liquidity is unavailable. Exit depth could not be assessed.'});
- else if(p.entryLiquidity&&liquidity<=p.entryLiquidity*(1-p.liquidityDropPct/100))events.push({kind:'liquidity_drop',severity:'urgent',message:`Pool liquidity is ${(100*(1-liquidity/p.entryLiquidity)).toFixed(1)}% below the opening snapshot. Exiting may be harder.`});
- return {peak,events};
+ return evaluateExitRules(p,price,liquidity);
 }
 export function socialSummary(posts:{text:string;author_id?:string;created_at?:string;public_metrics?:{like_count?:number;retweet_count?:number}}[]){
  const normalize=(text:string)=>text.toLowerCase().replace(/https?:\/\/\S+/g,'').replace(/\s+/g,' ').trim();

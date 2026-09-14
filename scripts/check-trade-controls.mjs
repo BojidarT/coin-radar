@@ -1,0 +1,67 @@
+import {capitalLimit,recentSnapshot,exitScenario,evaluateExitRules,advanceAlerts} from '../lib/trade-controls.mjs';
+let passed=0;
+function check(condition,message){if(!condition)throw new Error(message);passed++;}
+function near(actual,expected,message){check(Math.abs(actual-expected)<1e-9,message);}
+const config={bankroll:100,riskPct:10,maxAllocationPct:20,cashReserveUsd:5};
+check(capitalLimit(config,0).ceiling===10,'Full-loss principal cap');
+check(capitalLimit(config,8,8).ceiling===2,'Existing holdings in same token reduce remaining cap');
+check(capitalLimit(config,8,0).ceiling===10,'Other tokens consume total available capital');
+check(capitalLimit(config,93,0).ceiling===2,'Reserve excluded from available capital');
+check(capitalLimit(config,101,0).ceiling===0,'Overcommitted account fails closed');
+check(capitalLimit(config,10,10).ceiling===0,'No repeat order can bypass token cap');
+check(capitalLimit({...config,bankroll:20,riskPct:1},0).ceiling===0.2,'Small budget is not rounded up to tradable size');
+for(const value of [NaN,Infinity,-1,'10',null]){
+ check(!capitalLimit(config,value).valid,'Reject invalid exposure '+String(value));
+ check(!capitalLimit({...config,riskPct:value},0).valid,'Reject invalid risk limit '+String(value));
+}
+check(!capitalLimit(config,0,1).valid,'Inconsistent token exposure rejected');
+check(!capitalLimit({...config,riskPct:101},0).valid,'Risk percentage above 100 rejected');
+check(!capitalLimit({...config,cashReserveUsd:-1},0).valid,'Negative reserve rejected');
+check(capitalLimit({...config,cashReserveUsd:101},0).ceiling===0,'Oversized reserve cannot produce allocation');
+const now=1800000000000;
+check(recentSnapshot(now-90000,now),'Exact evidence age boundary accepted');
+check(!recentSnapshot(now-90001,now),'Expired evidence rejected');
+check(!recentSnapshot(now+1,now),'Future timestamps rejected');
+for(const value of [null,undefined,NaN,'garbage',0])check(!recentSnapshot(value,now),'Invalid timestamp rejected');
+check(recentSnapshot(new Date(now-1000).toISOString(),now),'ISO retrieval time accepted');
+const flat=exitScenario(5,0,2,0.2);
+near(flat.pnl,-0.3,'Costs deducted at flat price');
+near(flat.breakEvenPct,6.122448979591844,'Fee-adjusted break-even');
+near(exitScenario(5,flat.breakEvenPct,2,0.2).pnl,0,'Break-even yields zero net P&L');
+near(exitScenario(5,-100,2,0.2).pnl,-5.2,'Total-loss scenario includes extra fees');
+near(exitScenario(5,20,2,0.2).pnl,0.68,'Positive scenario after costs');
+for(const args of [[0,0,0,0],[5,-101,0,0],[5,0,100,0],[5,0,-1,0],[5,0,0,-1],[5,NaN,0,0]])
+ check(exitScenario(...args)===null,'Invalid scenario rejected');
+const p={entryPrice:1,peakPrice:1,entryLiquidity:100000,takeProfitPct:50,stopPct:20,trailingPct:15,liquidityDropPct:30};
+const has=(events,kind)=>events.some(event=>event.kind===kind);
+check(has(evaluateExitRules(p,.8,100000).events,'loss_threshold'),'Exact stop threshold');
+check(has(evaluateExitRules(p,1.5,100000).events,'profit_target'),'Exact profit threshold');
+check(has(evaluateExitRules({...p,peakPrice:2},1.7,100000).events,'trailing_pullback'),'Exact trailing threshold');
+check(has(evaluateExitRules(p,1,70000).events,'liquidity_drop'),'Exact liquidity drop threshold');
+check(evaluateExitRules(p,1.1,100000).events.length===0,'Ordinary movement produces no alert');
+check(evaluateExitRules({...p,peakPrice:2},null,100000).peak===2,'Outage preserves peak');
+check(has(evaluateExitRules(p,null,50000).events,'liquidity_drop'),'Liquidity crash still detected during price outage');
+check(has(evaluateExitRules(p,1,0).events,'liquidity_drop'),'Zero liquidity is urgent');
+check(has(evaluateExitRules({...p,entryLiquidity:null},1,0).events,'liquidity_drop'),'Zero liquidity urgent without baseline');
+for(const value of [NaN,Infinity,-1])check(has(evaluateExitRules(p,1,value).events,'liquidity_unavailable'),'Invalid liquidity unknown');
+check(has(evaluateExitRules({...p,entryPrice:0},1,1).events,'invalid_position'),'Invalid position fails closed');
+let next=advanceAlerts(undefined,evaluateExitRules(p,.7,100000).events);
+check(next.triggered.length===1&&next.triggered[0].episode===1,'First crossing alerts');
+next=advanceAlerts(next.state,evaluateExitRules(p,.7,100000).events);
+check(next.triggered.length===0,'Continuous breach does not spam');
+next=advanceAlerts(next.state,evaluateExitRules(p,null,100000).events);
+check(next.state.loss_threshold.active,'Outage does not count as price recovery');
+check(has(next.triggered,'data_unavailable'),'Outage has its own alert');
+next=advanceAlerts(next.state,evaluateExitRules(p,.7,100000).events);
+check(next.triggered.length===0,'Same loss episode resumes after missing data');
+next=advanceAlerts(next.state,evaluateExitRules(p,1,100000).events);
+check(!next.state.loss_threshold.active,'Observed recovery rearms loss rule');
+next=advanceAlerts(next.state,evaluateExitRules(p,.7,100000).events);
+check(next.triggered[0].episode===2,'Repeated crash alerts in a new episode');
+const low=advanceAlerts(undefined,evaluateExitRules(p,1,50000).events);
+const unknown=advanceAlerts(low.state,evaluateExitRules(p,1,null).events);
+check(unknown.state.liquidity_drop.active,'Unknown liquidity cannot rearm liquidity rule');
+const initial=JSON.stringify(next.state);
+advanceAlerts(next.state,[]);
+check(JSON.stringify(next.state)===initial,'Alert transition does not mutate prior persisted state');
+console.log('PASS: '+passed+' control assertions');
