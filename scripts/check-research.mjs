@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {defaultConfig,sizePosition,evaluatePosition,socialSummary} from '../lib/advisor.ts';
 const config={...defaultConfig,bankroll:1000};
-const coin={verdict:'Research candidate'};
+const coin={verdict:'Research candidate',price:1,liquidity:100000};
 assert.equal(sizePosition(config,0,coin,false).amount,0,'unreviewed token must never receive an allocation');
 assert.equal(sizePosition(config,0,{verdict:'High caution'},true).amount,0,'market risk must veto an entry');
 assert.equal(sizePosition(config,0,coin,true).amount,10,'1% total-loss ceiling caps principal, not only planned stop loss');
